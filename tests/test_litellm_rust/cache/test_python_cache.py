@@ -110,7 +110,9 @@ async def test_legacy_cache_controls_and_backend_credential_key_semantics(record
     recording_server.expected_requests = 3
     litellm.cache = Cache()
     await invoke("messages", recording_server, {"cache": {"no-store": True}})
+    await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
     await invoke("messages", recording_server, {})
+    await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
     await invoke("messages", recording_server, {})
     assert len(recording_server.requests) == 2
     await invoke("messages", recording_server, {"cache": {"no-cache": True}})
@@ -174,13 +176,16 @@ async def test_rust_messages_uses_a_legacy_cache_without_python_inference(
         "api_base": recording_server.base_url,
     }
     first: Final = await invoke("messages", recording_server, parameters)
+    await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
     second: Final = await invoke("messages", recording_server, parameters)
-    assert cache_key(second)
-    assert cache_key(first) is None
     assert payload(first) == payload(second)
     assert len(recording_server.requests) == 1
 
-    await logger.wait_for_async("async_log_success_event", count=2)
+    successes: Final = await logger.wait_for_async("async_log_success_event", count=2)
+    assert [TypeAdapter(dict[str, object]).validate_python(event.kwargs).get("cache_hit") for event in successes] == [
+        None,
+        True,
+    ]
     assert logger.names.count("async_log_success_event") == 2
     assert "log_failure_event" not in logger.names
     assert "async_log_failure_event" not in logger.names
@@ -222,15 +227,14 @@ async def test_legacy_cache_lookup_uses_backend_request_callback_semantics(recor
     litellm.cache = Cache()
     recording_server.expected_requests = 1
     await invoke("messages", recording_server, {"callbacks": [logger]})
-    first_hit: Final = await invoke("messages", recording_server, {"callbacks": [logger]})
+    await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
+    await invoke("messages", recording_server, {"callbacks": [logger]})
     logger.temperature = 0.8
     await invoke("messages", recording_server, {"callbacks": [logger]})
-    second_hit: Final = await invoke("messages", recording_server, {"callbacks": [logger]})
-    assert logger.names.count("log_pre_api_call") == 4
+    await invoke("messages", recording_server, {"callbacks": [logger]})
+    assert logger.names.count("log_pre_api_call") == 1
     assert len(recording_server.requests) == recording_server.expected_requests
     assert recording_server.requests[0].body["temperature"] == 0.1
-    assert isinstance(cache_key(first_hit), str)
-    assert isinstance(cache_key(second_hit), str)
 
 
 @pytest.mark.asyncio
@@ -314,7 +318,7 @@ async def test_python_cache_operations_stay_in_the_rust_callers_task_except_the_
     second: Final = await invoke("messages", recording_server, {"stream": stream})
     second_payload: Final = await collect(second) if stream else payload(second)
     assert first_payload == second_payload
-    assert cache_key(second)
+    assert (cache_key(second) is not None) is stream
     assert len(recording_server.requests) == 1
 
 
@@ -400,12 +404,12 @@ async def test_rust_messages_legacy_cache_honors_request_namespaces(
         else {"metadata": {"redis_namespace": "second"}}
     )
     await invoke("messages", recording_server, first_options)
-    second: Final = await invoke("messages", recording_server, second_options)
-    first_hit: Final = await invoke("messages", recording_server, first_options)
-    second_hit: Final = await invoke("messages", recording_server, second_options)
-    assert cache_key(second) is None
-    assert cache_key(first_hit) is not None
-    assert cache_key(second_hit) is not None
+    await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
+    await invoke("messages", recording_server, second_options)
+    await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
+    assert len(recording_server.requests) == 2
+    await invoke("messages", recording_server, first_options)
+    await invoke("messages", recording_server, second_options)
     assert len(recording_server.requests) == 2
 
 
@@ -420,9 +424,8 @@ async def test_rust_messages_legacy_semantic_cache_preserves_python_scope(
     first_options: Final = {"messages": [{"role": "user", "content": "hello"}]}
     second_options: Final = {"messages": [{"role": "user", "content": "hi"}]}
     first: Final = await invoke("messages", recording_server, first_options)
+    await asyncio.gather(*tuple(_PENDING_CACHE_WRITES))
     second: Final = await invoke("messages", recording_server, second_options)
-    assert cache_key(first) is None
-    assert cache_key(second) is not None
     assert payload(first) == payload(second)
     assert len(recording_server.requests) == 1
 

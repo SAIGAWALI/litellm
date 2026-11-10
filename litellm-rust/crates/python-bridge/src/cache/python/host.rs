@@ -59,7 +59,7 @@ impl PythonCache {
                 self.pending = Some(Pending::Lookup(reply));
                 (
                     if self.asynchronous {
-                        "async_get_cache"
+                        "lookup"
                     } else {
                         "get_cache"
                     },
@@ -89,6 +89,10 @@ impl PythonCache {
             Some(value) => cache
                 .bind(py)
                 .call_method(method, (value,), Some(&arguments)),
+            None if self.asynchronous => py
+                .import(CACHE_HOST_MODULE)?
+                .getattr(method)?
+                .call((cache,), Some(&arguments)),
             None => cache.bind(py).call_method(method, (), Some(&arguments)),
         }
         .map(Bound::unbind);
